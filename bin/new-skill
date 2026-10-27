@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# new-skill — scaffold a new skill in this repo and symlink it into ~/.claude/skills/
+#
+# Usage:  bin/new-skill <name>
+
+set -eo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NAME=${1:-}
+
+if [ -z "$NAME" ]; then
+    echo "usage: $0 <name>" >&2
+    exit 2
+fi
+
+SKILL_DIR="$REPO_ROOT/$NAME"
+LINK="$HOME/.claude/skills/$NAME"
+
+if [ -e "$SKILL_DIR" ]; then
+    echo "already exists: $SKILL_DIR" >&2
+    exit 1
+fi
+
+if [ -e "$LINK" ] || [ -L "$LINK" ]; then
+    echo "already exists in ~/.claude/skills: $LINK" >&2
+    exit 1
+fi
+
+mkdir -p "$SKILL_DIR"
+cat > "$SKILL_DIR/SKILL.md" <<EOF
+---
+name: $NAME
+description: TODO one-line description including trigger phrases users would say to invoke this skill.
+---
+
+# $NAME
+
+TODO: overview of what this skill does and when to use it.
+
+## Inputs
+
+TODO.
+
+## Workflow
+
+TODO.
+EOF
+
+ln -s "$SKILL_DIR" "$LINK"
+
+echo "Created: $SKILL_DIR"
+echo "Linked:  $LINK -> $SKILL_DIR"
+echo "Next:    edit $SKILL_DIR/SKILL.md"

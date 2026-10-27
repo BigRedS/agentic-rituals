@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# link-skills — symlink everything in this repo into its target location.
+#
+# Two kinds of things get linked:
+#
+#   1. Skills — every top-level directory except bin/ and conventions/ is
+#      symlinked into ~/.claude/skills/<name>.
+#
+#   2. (removed) — add a block below if you have convention files to link
+#      target paths listed in the "Convention files" block below. Each
+#      entry there is a one-liner: `src` in the repo, `dst` on the
+#      filesystem. If you want to add or remove a convention file, edit
+#      that block directly — no other logic to change.
+#
+# Idempotent. Safe to run repeatedly. Refuses to overwrite an existing
+# real file/directory at the target (won't clobber something you added
+# manually).
+#
+# Usage:  bin/link-skills [--dry-run]
+
+set -eo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SKILLS_TARGET="$HOME/.claude/skills"
+DRY_RUN=${1:-}
+
+link_one() {
+    # link_one <src> <dst>  — create/refresh symlink <dst> → <src>.
+    local src="$1"
+    local dst="$2"
+    local name
+    name=$(basename "$dst")
+
+    mkdir -p "$(dirname "$dst")"
+
+    if [ -L "$dst" ]; then
+        local existing
+        existing=$(readlink "$dst")
+        if [ "$existing" = "$src" ]; then
+            echo "  ok   $dst"
+            return
+        else
+            echo "  fix  $dst  (was → $existing)"
+            [ "$DRY_RUN" = "--dry-run" ] && return
+            rm "$dst"
+            ln -s "$src" "$dst"
+            return
+        fi
+    fi
+
+    if [ -e "$dst" ]; then
+        echo "  SKIP $dst  (real file/dir exists — promote or remove first)"
+        return
+    fi
+
+    echo "  new  $dst  →  $src"
+    [ "$DRY_RUN" = "--dry-run" ] && return
+    ln -s "$src" "$dst"
+}
+
+echo "Skills → $SKILLS_TARGET"
+for skill_dir in "$REPO_ROOT"/*/; do
+    [ -d "$skill_dir" ] || continue
+    name=$(basename "$skill_dir")
+    case "$name" in
+        bin|.git|conventions|tests|examples|hooks) continue ;;
+    esac
+    link_one "${skill_dir%/}" "$SKILLS_TARGET/$name"
+done
+
+# Shared scripts — skills reference these as ../bin/<name>, which only resolves
+# if bin/ sits alongside the linked skill dirs at the target too.
+echo "Shared bin:"
+link_one "$REPO_ROOT/bin" "$SKILLS_TARGET/bin"
+

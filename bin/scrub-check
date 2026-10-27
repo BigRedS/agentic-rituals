@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# scrub-check — grep the repo for anything that must not be in a public copy:
+# employer names, product-internal tool names, Slack user/channel IDs, work
+# email domains, and a caller-supplied list of customer slugs and people.
+#
+# Usage:  bin/scrub-check [<extra-terms-file>]
+#   <extra-terms-file>  one term per line (customer slugs, surnames…), kept
+#                       OUTSIDE this repo. Grep is case-insensitive.
+# Exit 1 on any hit. Run before every push.
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+pattern='coralogix|cx-catalog|tam-crm|cs-internal|dataprime|U0[0-9A-Z]{8,}|C0[0-9A-Z]{8,}|@[a-z0-9-]+\.com'
+if [ -n "${1:-}" ] && [ -f "$1" ]; then
+    # Extra terms match as whole words, so a slug like "name" doesn't light
+    # up every "basename". Word chars here are [a-z0-9-].
+    extra=$(grep -v '^\s*$' "$1" | paste -sd'|' -)
+    [ -n "$extra" ] && pattern="$pattern|(^|[^a-z0-9-])($extra)([^a-z0-9-]|$)"
+fi
+hits=$(grep -rniE "$pattern" "$ROOT" --exclude-dir=.git --exclude=scrub-check || true)
+if [ -n "$hits" ]; then echo "$hits"; echo; echo "scrub-check: hits above — fix before publishing" >&2; exit 1; fi
+echo "scrub-check: clean"

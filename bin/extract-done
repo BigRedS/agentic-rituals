@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# extract-done — read an open-items.md file and emit a JSON array of
+# anchors from checkbox items marked [x]. Used by the open-items skill
+# to preserve done state across runs.
+#
+# An anchor is the identifier in an HTML comment on the item, e.g.
+#   <!-- slack:C0123:1729512345.000 -->
+#   <!-- gong:5802802678030503927:9f2e -->
+#
+# Anchors are opaque strings — the caller decides how to compare them
+# against fresh source data.
+#
+# Usage:  bin/extract-done [<file>]
+#   Default file: $OPEN_ITEMS_FILE, else ~/notes/open-items.md
+#
+# Output: JSON array of anchor strings on stdout. Empty array `[]` if
+# the file is missing or has no done items. Never fails on missing file.
+
+set -euo pipefail
+
+FILE="${1:-${OPEN_ITEMS_FILE:-$HOME/notes/open-items.md}}"
+
+if [ ! -f "$FILE" ]; then
+    echo '[]'
+    exit 0
+fi
+
+# State machine: track whether we're inside a done-item block. The
+# tolerant `\[ *[xX] *\]` pattern catches every common tick form:
+# `[x]`, `[X]`, `[ x]`, `[x ]`, `[ x ]` — all count as done. A plain
+# unticked `[ ]` closes the block, as does a new bullet at column 0,
+# a heading, or a blank line. When inside a done block, print any
+# anchor comment.
+awk '
+    /^- \[ *[xX] *\]/      { in_done = 1; next }
+    /^- \[ *\]/            { in_done = 0; next }
+    /^- /                  { in_done = 0; next }
+    /^#/                   { in_done = 0 }
+    /^$/                   { in_done = 0 }
+    in_done && /<!-- [^ ]+ -->/ {
+        s = index($0, "<!-- ") + 5
+        e = index($0, " -->")
+        if (s > 5 && e > s) print substr($0, s, e - s)
+    }
+' "$FILE" | jq -R . | jq -s .

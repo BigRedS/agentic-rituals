@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# extract-open — read an open-items.md file and emit the unticked items as
+# JSON, so the open-items skill can carry them forward once their source has
+# aged out of the fetch window. Sibling of extract-done.
+#
+# Without this, an item vanishes the morning its Slack message passes 14 days
+# or its meeting passes 7, whether or not it was ever dealt with: the fetchers
+# can only report what is inside their window, and "no longer reported" was
+# being read as "done".
+#
+# Usage:  bin/extract-open [--slack-days N] [<file>]
+#   --slack-days  the Slack window the same run fetches with (default 14)
+#   Default file: $OPEN_ITEMS_FILE, else ~/notes/open-items.md
+#
+# Output: JSON array, one object per unticked item that carries an anchor:
+#   {section, anchor, source, block, carry_if_absent}
+#   - section          the `## ` heading it sat under (customer tag)
+#   - block            the item's lines verbatim, task line first
+#   - carry_if_absent  whether to keep it when today's fetch doesn't return it.
+#       Slack items still inside the window are false: the fetcher would have
+#       returned them if they were still open, so absence means someone
+#       replied. Older Slack items, and every meeting action (Gong/Zoom next
+#       steps never close on their own), are true — only a tick removes them.
+# Empty array `[]` if the file is missing. Never fails on a missing file.
+
+set -euo pipefail
+
+SLACK_DAYS=14
+if [ "${1:-}" = "--slack-days" ]; then
+    SLACK_DAYS="$2"
+    shift 2
+fi
+FILE="${1:-${OPEN_ITEMS_FILE:-$HOME/notes/open-items.md}}"
+
+if [ ! -f "$FILE" ]; then
+    echo '[]'
+    exit 0
+fi
+
+# Same block rules as extract-done: an item runs from its `- [ ]` line until
+# a blank line, the next bullet at column 0, or a heading. Records are
+# separated by RS (\036) and fields by US (\037) so the verbatim block can
+# hold any text.
+awk '
+    function flush() {
+        if (in_open && anchor != "") printf "%s\037%s\037%s\036", section, anchor, block
+        in_open = 0; anchor = ""; block = ""
+    }
+    /^## /                 { flush(); section = substr($0, 4); next }
+    /^#/                   { flush(); next }
+    /^$/                   { flush(); next }
+    /^- \[ \]/             { flush(); in_open = 1; block = $0; next }
+    /^- /                  { flush(); next }
+    in_open {
+        block = block "\n" $0
+        if ($0 ~ /<!-- [^ ]+ -->/) {
+            s = index($0, "<!-- ") + 5
+            e = index($0, " -->")
+            if (s > 5 && e > s) anchor = substr($0, s, e - s)
+        }
+    }
+    END { flush() }
+' "$FILE" | jq -Rs --argjson days "$SLACK_DAYS" --argjson now "$(date +%s)" '
+    split("\u001e")[:-1]
+    | map(split("\u001f") as $f
+        | ($f[1] | split(":")) as $a
+        | {section: $f[0], anchor: $f[1], source: $a[0], block: $f[2]}
+        | .carry_if_absent = (
+            if .source == "slack"
+            then ($a[2] | split(".")[0] | tonumber) < ($now - $days * 86400)
+            else true end))
+'
