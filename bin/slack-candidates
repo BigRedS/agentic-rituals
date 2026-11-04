@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# slack-candidates — the open-items fetcher for Slack. Emits the two
+# pre-filtered lists the skill classifies, plus a collected_at the skill must
+# quote back. The model never calls Slack itself; this does.
+#
+# Usage:  bin/slack-candidates [days]      (default 14)
+#
+# Token: $SLACK_TOKEN, else the first line of
+#   ${XDG_CONFIG_HOME:-~/.config}/agentic-rituals/slack-token   (chmod 600)
+# It must be a USER token (xoxp-), because search.messages refuses bot tokens.
+# User scopes: search:read, channels:history, groups:history, im:history,
+# mpim:history. Never printed.
+#
+# Browser-session token (xoxc-): also needs the `d` cookie (xoxd-), from
+# $SLACK_COOKIE or the first line of $CONF/slack-cookie (chmod 600). Slack
+# rejects an xoxc- token sent without it. The session dies on logout.
+#
+# Optional exclude list, one channel NAME per line (bots, alerts):
+#   ${XDG_CONFIG_HOME:-~/.config}/agentic-rituals/slack-exclude
+#
+# Output (stdout): see "Fetch candidates" in the open-items skill. Any Slack
+# error aborts with a non-zero exit and nothing on stdout: a half-fetched list
+# would look like "nothing open", and the skill would drop real items as done.
+#
+# How "replied" is decided:
+#   - DMs and group DMs: any later message in the conversation.
+#   - Channels: any later message in the thread of the matched message. A
+#     top-level channel message is its own thread root, so replies to it count
+#     and unrelated chatter in the channel does not.
+#
+# SLACK_API is overridable so tests can point at a fake; see tests/slack-candidates.
+
+set -euo pipefail
+
+DAYS="${1:-14}"
+SLACK_API="${SLACK_API:-https://slack.com/api}"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/agentic-rituals"
+
+if [ -n "${SLACK_TOKEN:-}" ]; then
+    TOKEN="$SLACK_TOKEN"
+elif [ -r "$CONF/slack-token" ]; then
+    TOKEN=$(head -n1 "$CONF/slack-token")
+else
+    echo "slack-candidates: no token. Set SLACK_TOKEN or write it to $CONF/slack-token" >&2
+    exit 1
+fi
+
+COOKIE=${SLACK_COOKIE:-}
+if [ -z "$COOKIE" ] && [ -r "$CONF/slack-cookie" ]; then
+    COOKIE=$(head -n1 "$CONF/slack-cookie")
+fi
+case "$TOKEN" in xoxc-*)
+    [ -n "$COOKIE" ] || { echo "slack-candidates: xoxc- token needs a d cookie: set SLACK_COOKIE or write $CONF/slack-cookie" >&2; exit 1; } ;;
+esac
+
+EXCLUDE='[]'
+if [ -r "$CONF/slack-exclude" ]; then
+    EXCLUDE=$(grep -v '^\s*$' "$CONF/slack-exclude" | jq -R . | jq -s .)
+fi
+
+hdr=$(mktemp)
+raw=$(mktemp)
+trap 'rm -f "$hdr" "$raw"' EXIT
+
+# slack <method> [key=value ...] — GET, retry on 429, abort on ok:false.
+slack() {
+    local method=$1 args=() kv
+    shift
+    for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+    local out code body
+    while :; do
+        out=$(curl -sS -G -D "$hdr" -w $'\n%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" ${COOKIE:+-H "Cookie: d=$COOKIE"} ${args[@]+"${args[@]}"} "$SLACK_API/$method")
+        code=${out##*$'\n'}
+        body=${out%$'\n'*}
+        if [ "$code" = 429 ]; then
+            sleep "$(awk 'tolower($1)=="retry-after:" {print $2+0}' "$hdr" | head -n1)"
+            continue
+        fi
+        break
+    done
+    if [ "$(jq -r '.ok // false' <<<"$body")" != true ]; then
+        echo "slack-candidates: $method failed: $(jq -r '.error // "no JSON"' <<<"$body")" >&2
+        exit 1
+    fi
+    printf '%s' "$body"
+}
+
+ME=$(slack auth.test | jq -r .user_id)
+since_ts=$(( $(date +%s) - DAYS * 86400 ))
+# search's after: is exclusive and day-granular, so ask for the day before
+# the window and trim by ts afterwards.
+after_day=$(date -u -r $((since_ts - 86400)) +%Y-%m-%d 2>/dev/null || date -u -d "@$((since_ts - 86400))" +%Y-%m-%d)
+
+# search <query> — every match, one JSON object per line.
+search() {
+    local page=1 pages=1 body
+    while [ "$page" -le "$pages" ]; do
+        body=$(slack search.messages "query=$1" count=100 "page=$page" sort=timestamp sort_dir=asc)
+        jq -c '.messages.matches[]' <<<"$body"
+        pages=$(jq -r '.messages.paging.pages' <<<"$body")
+        page=$((page + 1))
+    done
+}
+
+# thread_of <match> — the thread_ts Slack puts in the permalink, if any.
+thread_of() { jq -r '.permalink | capture("thread_ts=(?<t>[0-9.]+)").t // empty' <<<"$1"; }
+
+# Fetch what came after (and up to six before) a matched message.
+# Prints {"before": [...], "after": [...]}, both oldest-first, after excluding
+# the message itself.
+surround() {
+    local channel=$1 ts=$2 thread=$3 is_dm=$4
+    if [ "$is_dm" = true ]; then
+        local b a
+        b=$(slack conversations.history "channel=$channel" "latest=$ts" inclusive=true limit=6)
+        a=$(slack conversations.history "channel=$channel" "oldest=$ts" inclusive=false limit=50)
+        jq -n --argjson b "$b" --argjson a "$a" \
+            '{before: ($b.messages | reverse), after: ($a.messages | reverse)}'
+    else
+        slack conversations.replies "channel=$channel" "ts=${thread:-$ts}" limit=200 |
+            jq --arg ts "$ts" '.messages as $m | {
+                before: [$m[] | select((.ts|tonumber) <= ($ts|tonumber))] | .[-6:],
+                after:  [$m[] | select((.ts|tonumber) >  ($ts|tonumber))]}'
+    fi
+}
+
+# Searches, then build candidates. Dedup on channel:ts because a mention in a
+# DM matches two queries.
+{
+    search "<@$ME> -from:<@$ME> after:$after_day" | jq -c '. + {kind: "in"}'
+    search "to:me -from:<@$ME> after:$after_day" | jq -c '. + {kind: "in"}'
+    search "from:<@$ME> after:$after_day"        | jq -c '. + {kind: "out"}'
+} | jq -sc --argjson since "$since_ts" --argjson exclude "$EXCLUDE" '
+    map(select((.ts|tonumber) >= $since and (.channel.name as $n | $exclude | index($n) | not)))
+    | unique_by(.channel.id + ":" + .ts) | .[]' |
+while IFS= read -r m; do
+    channel=$(jq -r .channel.id <<<"$m")
+    ts=$(jq -r .ts <<<"$m")
+    kind=$(jq -r .kind <<<"$m")
+    is_dm=$(jq -r '(.channel.is_im // false) or (.channel.is_mpim // false)' <<<"$m")
+    thread=$(thread_of "$m")
+    around=$(surround "$channel" "$ts" "$thread" "$is_dm")
+    jq -c --arg me "$ME" --arg thread "$thread" --argjson around "$around" '
+        . as $m
+        | ($around.after | map(.user == $me)  | any) as $replied_by_me
+        | ($around.after | length > 0)               as $anything_after
+        | {kind: $m.kind,
+           keep: (if $m.kind == "in" then ($m.user != $me and ($replied_by_me | not))
+                  else ($anything_after | not) end),
+           item: ({channel_id: $m.channel.id, channel_name: $m.channel.name,
+                   author_id: $m.user, ts: $m.ts, text: $m.text,
+                   permalink: $m.permalink,
+                   context: ($around.before | map({user, ts, text}))}
+                  + (if $thread != "" then {thread_ts: $thread} else {} end))}
+    ' <<<"$m"
+done > "$raw"
+
+# Only reached if every call above succeeded (set -e inside the loop aborts).
+jq -s --arg me "$ME" --argjson days "$DAYS" --arg collected "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg window "$(date -u -r "$since_ts" +%Y-%m-%d 2>/dev/null || date -u -d "@$since_ts" +%Y-%m-%d)" '
+    map(select(.keep)) as $k
+    | {user_id: $me, window_start: $window, collected_at: $collected,
+       inbound_unreplied: [$k[] | select(.kind == "in")  | .item],
+       outbound_open:     [$k[] | select(.kind == "out") | .item]}' "$raw"

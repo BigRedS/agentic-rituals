@@ -12,7 +12,7 @@ description: >
   file plus the calendar.
 metadata:
   version: "example"
-  scripts: ../bin/extract-done, ../bin/extract-open, <your fetcher>
+  scripts: ../bin/extract-done, ../bin/extract-open, ../bin/slack-candidates
 ---
 
 # Open items
@@ -20,7 +20,7 @@ metadata:
 This is the real skill with the employer-specific sources cut out. What is
 left is the shape: a deterministic fetcher, an LLM classification step, an
 anchor-based render that preserves ticks, and the rules that stop the model
-from taking shortcuts. Plug in your own fetcher for step 2; the rest holds.
+from taking shortcuts. Step 2 uses `../bin/slack-candidates`; swap in your own fetcher if your sources differ, the rest holds.
 
 Sweep Slack for anything the user owes a response on, is waiting on, or
 committed to. Write `~/notes/open-items.md`, overwriting each run — but
@@ -97,10 +97,10 @@ Everything else is `true`. The script decides; don't second-guess per item.
 ### 2. Fetch candidates
 
 ```bash
-<your-fetcher> 14 > /tmp/slack-candidates.json
+../bin/slack-candidates 14 > /tmp/slack-candidates.json
 ```
 
-Whatever your fetcher is, it should emit two pre-filtered lists and a
+`slack-candidates` emits (and any replacement fetcher must emit) two pre-filtered lists and a
 `collected_at`:
 
 ```

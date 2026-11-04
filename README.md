@@ -119,7 +119,7 @@ The hook in `hooks/` resolves this: new files pass through, writes to existing f
 
 ## What didn't transfer
 
-**Sources plumbing.** The Slack fetcher, the meeting fetcher and the account resolver were all specific to one employer's stack and are not here. The
+**Sources plumbing.** The meeting fetcher and the account resolver were specific to one employer's stack and are not here. `bin/slack-candidates` is a generic Slack fetcher (see `setup.md`). The
 fetcher contract is in `examples/open-items/SKILL.md` step 2; it is two pre-filtered lists and a timestamp, and writing one against your own Sources
 is probably several minutes in your own Claude.
 
@@ -132,10 +132,12 @@ These are all built with the same rules, and broadly the same process - a plan-m
 
 ## Using what is here
 
+`setup.md` has the full install and credentials steps, including the Slack token. The short version:
+
 ```
 git clone <this repo> ~/repos/agent-rituals
-cp -r examples/open-items ~/.claude/skills/        # then write a fetcher
-cp bin/extract-done bin/extract-open ~/.claude/skills/bin/
+cp -r examples/open-items ~/.claude/skills/
+cp bin/extract-done bin/extract-open bin/slack-candidates ~/.claude/skills/bin/
 ```
 
 Or more honestly: read `examples/open-items/SKILL.md`, read the forbidden-shortcuts list, and start your own with a fetcher against whatever your sources are. The scripts and the format will fit.
